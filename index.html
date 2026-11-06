@@ -279,6 +279,29 @@ td input { width: 64px; padding: 5px 6px; text-align: right; font-size: 14px; }
       </form>
     </div>
     <div class="carte">
+      <h2>Transférer les identifiants par QR code</h2>
+      <p class="note">Évite de recopier les codes Netatmo sur le téléphone. <b>Sur le PC</b> : ouvre cette page, colle tes 3 identifiants ci-dessous et affiche le QR code. <b>Sur le téléphone</b> : ouvre l'appli depuis son icône, puis touche « Scanner le QR code ». Le QR code donne accès à ton thermostat : ne le photographie pas et ne le partage pas.</p>
+      <div class="actions"><button type="button" class="primaire" id="btn-scanner">Scanner le QR code</button></div>
+      <div id="zone-scan" hidden style="margin-top:10px">
+        <video id="video" playsinline muted style="width:100%;max-height:60vh;border-radius:8px;background:#000"></video>
+        <p class="note" id="scan-etat" style="margin:6px 0">Vise le QR code affiché sur le PC…</p>
+        <button type="button" id="btn-scan-stop">Arrêter</button>
+      </div>
+      <details id="det-qr" style="margin-top:12px">
+        <summary style="cursor:pointer;font-weight:600">Préparer le QR code (sur le PC)</summary>
+        <form class="reglages" id="form-qr" autocomplete="off" style="margin-top:10px">
+          <div class="champ"><label for="q-client-id">Client ID</label><input id="q-client-id" type="text" spellcheck="false" autocapitalize="off"></div>
+          <div class="champ"><label for="q-client-secret">Client secret</label><input id="q-client-secret" type="password" spellcheck="false" autocapitalize="off"></div>
+          <div class="champ"><label for="q-refresh">Refresh token</label><input id="q-refresh" type="password" spellcheck="false" autocapitalize="off"></div>
+          <div class="actions"><button type="submit" class="primaire">Afficher le QR code</button><button type="button" id="btn-qr-effacer">Effacer</button></div>
+        </form>
+        <div id="qr-zone" hidden style="margin-top:12px;text-align:center">
+          <div id="qr-image" style="background:#fff;padding:12px;border-radius:8px;display:inline-block;width:min(320px,100%)"></div>
+          <p class="note">QR code valable tant que tu n'as pas utilisé ce refresh token ailleurs. Ferme-le après l'avoir scanné.</p>
+        </div>
+      </details>
+    </div>
+    <div class="carte">
       <h2>Données</h2>
       <p class="note" id="info-stockage">–</p>
       <div class="actions">
@@ -989,6 +1012,99 @@ function exporterCsv() {
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
 }
 
+/* ---------------------------------------------------------------- transfert par QR code */
+const LIB_QR = "https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js";
+const LIB_SCAN = "https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js";
+function chargerScript(url) {
+  return new Promise((ok, ko) => {
+    if (document.querySelector('script[src="' + url + '"]')) return ok();
+    const sc = document.createElement("script");
+    sc.src = url; sc.onload = () => ok(); sc.onerror = () => ko(new Error("bibliothèque indisponible"));
+    document.head.appendChild(sc);
+  });
+}
+function encoderConfig(o) {
+  const octets = new TextEncoder().encode(JSON.stringify(o));
+  let bin = ""; octets.forEach(b => { bin += String.fromCharCode(b); });
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function decoderConfig(code) {
+  const b64 = code.replace(/-/g, "+").replace(/_/g, "/");
+  const bin = atob(b64 + "===".slice((b64.length + 3) % 4));
+  return JSON.parse(new TextDecoder().decode(Uint8Array.from(bin, c => c.charCodeAt(0))));
+}
+function importerConfig(code) {
+  let o;
+  try { o = decoderConfig(code); } catch (e) { afficherErreur("QR code de configuration illisible. Affiche-le de nouveau sur le PC."); return false; }
+  if (!o || !o.i || !o.s || !o.r) { afficherErreur("QR code de configuration incomplet."); return false; }
+  const c = etat.cfg;
+  if (c.clientId && c.clientId !== o.i) { etat.donnees = { pieces: [], piecesMaj: 0, temp: {}, chaudiere: {} }; LS.set("donnees", etat.donnees); }
+  c.clientId = o.i; c.clientSecret = o.s; c.refresh = o.r;
+  etat.jeton = null; LS.del("jeton");
+  LS.set("cfg", c);
+  remplirReglages();
+  afficherErreur("");
+  return true;
+}
+function urlConfig() {
+  return location.origin + location.pathname + "#cfg=" + encoderConfig({ i: $("q-client-id").value.trim(), s: $("q-client-secret").value.trim(), r: $("q-refresh").value.trim() });
+}
+$("form-qr").addEventListener("submit", async ev => {
+  ev.preventDefault();
+  if (!$("q-client-id").value.trim() || !$("q-client-secret").value.trim() || !$("q-refresh").value.trim()) { afficherErreur("Remplis les 3 identifiants pour créer le QR code."); return; }
+  afficherErreur("");
+  try { await chargerScript(LIB_QR); } catch (e) { afficherErreur("Impossible de créer le QR code : vérifie la connexion internet."); return; }
+  const qr = qrcode(0, "M"); qr.addData(urlConfig()); qr.make();
+  $("qr-image").innerHTML = qr.createSvgTag({ cellSize: 4, margin: 2, scalable: true });
+  const svg = $("qr-image").querySelector("svg"); if (svg) { svg.style.width = "100%"; svg.style.height = "auto"; svg.setAttribute("role", "img"); svg.setAttribute("aria-label", "QR code de configuration"); }
+  $("qr-zone").hidden = false;
+});
+$("btn-qr-effacer").addEventListener("click", () => {
+  for (const id of ["q-client-id", "q-client-secret", "q-refresh"]) $(id).value = "";
+  $("qr-image").innerHTML = ""; $("qr-zone").hidden = true;
+});
+let fluxCamera = null;
+function arreterScan() {
+  if (fluxCamera) fluxCamera.getTracks().forEach(t => t.stop());
+  fluxCamera = null; $("video").srcObject = null; $("zone-scan").hidden = true;
+}
+function lireImage(source, l, h) {           // renvoie le code de configuration trouvé dans l'image, sinon null
+  const cv = lireImage.cv || (lireImage.cv = document.createElement("canvas"));
+  cv.width = l; cv.height = h;
+  const ctx = cv.getContext("2d", { willReadFrequently: true });
+  ctx.drawImage(source, 0, 0, l, h);
+  const r = jsQR(ctx.getImageData(0, 0, l, h).data, l, h, { inversionAttempts: "dontInvert" });
+  if (!r || !r.data) return undefined;
+  const m = r.data.match(/#cfg=([A-Za-z0-9_-]+)/);
+  return m ? m[1] : null;
+}
+$("btn-scanner").addEventListener("click", async () => {
+  afficherErreur("");
+  try { await chargerScript(LIB_SCAN); } catch (e) { afficherErreur("Impossible de lancer le scanner : vérifie la connexion internet."); return; }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { afficherErreur("Ce navigateur ne donne pas accès à l'appareil photo. Scanne plutôt le QR code avec l'appareil photo du téléphone."); return; }
+  try { fluxCamera = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false }); }
+  catch (e) { afficherErreur("Accès à l'appareil photo refusé. Autorise-le dans les réglages du téléphone, puis réessaie."); return; }
+  const v = $("video");
+  v.srcObject = fluxCamera; $("zone-scan").hidden = false; $("scan-etat").textContent = "Vise le QR code affiché sur le PC…";
+  try { await v.play(); } catch (e) { /* lecture auto refusée : l'image arrive quand même */ }
+  const boucle = () => {
+    if (!fluxCamera) return;
+    if (v.readyState >= 2 && v.videoWidth) {
+      const k = Math.min(1, 640 / v.videoWidth);
+      const code = lireImage(v, Math.round(v.videoWidth * k), Math.round(v.videoHeight * k));
+      if (code) {
+        arreterScan();
+        if (importerConfig(code)) { montrer("jour"); dire("Identifiants importés"); actualiser(); }
+        return;
+      }
+      if (code === null) $("scan-etat").textContent = "Ce QR code n'est pas celui de la configuration.";
+    }
+    requestAnimationFrame(boucle);
+  };
+  boucle();
+});
+$("btn-scan-stop").addEventListener("click", arreterScan);
+
 /* ---------------------------------------------------------------- événements */
 document.querySelectorAll("nav.onglets button").forEach(b => b.addEventListener("click", () => montrer(b.dataset.vue)));
 $("btn-actualiser").addEventListener("click", actualiser);
@@ -1041,6 +1157,14 @@ document.addEventListener("visibilitychange", () => {          // rouvrir l'appl
 
 /* ---------------------------------------------------------------- démarrage */
 remplirReglages();
+{
+  const m = location.hash.match(/^#cfg=([A-Za-z0-9_-]+)/);
+  if (m) {
+    const ok = importerConfig(m[1]);
+    try { history.replaceState(null, "", location.pathname + location.search); } catch (e) { location.hash = ""; }
+    if (ok) try { sessionStorage.setItem("chauffage.vue", "jour"); } catch (e) { /* rien */ }
+  }
+}
 remplirParametres();
 let vueInit = "jour";
 try { vueInit = sessionStorage.getItem("chauffage.vue") || "jour"; } catch (e) { /* rien */ }
